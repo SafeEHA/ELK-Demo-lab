@@ -1,5 +1,26 @@
 provider "aws" {
-  region = "us-west-2"  # Adjust to your preferred region
+  region = "eu-west-2"  # London region
+}
+
+# Data source to automatically get the latest Ubuntu 22.04 LTS AMI for eu-west-2
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"]  # Canonical (Ubuntu official)
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
 }
 
 resource "aws_security_group" "elk_sg" {
@@ -12,6 +33,7 @@ resource "aws_security_group" "elk_sg" {
     to_port     = 9200
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "Elasticsearch"
   }
 
   # Kibana ports
@@ -20,6 +42,7 @@ resource "aws_security_group" "elk_sg" {
     to_port     = 5601
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "Kibana"
   }
 
   # HTTP port
@@ -28,6 +51,7 @@ resource "aws_security_group" "elk_sg" {
     to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "HTTP"
   }
 
   # HTTPS port
@@ -36,6 +60,7 @@ resource "aws_security_group" "elk_sg" {
     to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "HTTPS"
   }
 
   # Logstash Beats input port
@@ -44,6 +69,7 @@ resource "aws_security_group" "elk_sg" {
     to_port     = 5044
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "Logstash Beats"
   }
 
   # App server port
@@ -52,6 +78,7 @@ resource "aws_security_group" "elk_sg" {
     to_port     = 8080
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "Application"
   }
 
   # SSH access
@@ -59,7 +86,8 @@ resource "aws_security_group" "elk_sg" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]  # Replace with your IP
+    cidr_blocks = ["0.0.0.0/0"]  # TODO: Replace with your IP for security
+    description = "SSH"
   }
 
   egress {
@@ -67,11 +95,16 @@ resource "aws_security_group" "elk_sg" {
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow all outbound"
+  }
+
+  tags = {
+    Name = "elk-security-group"
   }
 }
 
 resource "aws_instance" "elk_server" {
-  ami           = "ami-075686beab831bb7f"  # Ubuntu AMI (adjust for your region)
+  ami           = data.aws_ami.ubuntu.id  # Uses the data source
   instance_type = "t3.large"  # Recommended for ELK
 
   root_block_device {
@@ -80,26 +113,28 @@ resource "aws_instance" "elk_server" {
     encrypted   = true
   }
 
-  key_name      = "test-keypair"  # Replace with your EC2 key pair
+  key_name = "cba_keypair"  # Replace with your EC2 key pair
 
-  security_groups = [aws_security_group.elk_sg.name]
+  vpc_security_group_ids = [aws_security_group.elk_sg.id]
 
   user_data = file("${path.module}/ELK.sh")
 
   tags = {
     Name = "ELK-Server"
   }
+
   provisioner "local-exec" {
     command = "echo 'ELK server created with IP: ${self.public_ip}'"
   }
+
   provisioner "local-exec" {
-    command = "echo '\\n\\nIMPORTANT: Please wait 3-5 minutes for the ELK stack to fully initialize before accessing Elasticsearch or Kibana.\\n'"
+    command = "echo '\n\nIMPORTANT: Please wait 3-5 minutes for the ELK stack to fully initialize before accessing Elasticsearch or Kibana.\n'"
   }
 }
 
 resource "aws_instance" "app_server" {
-  ami           = "ami-0efcece6bed30fd98"  # Ubuntu AMI (adjust for your region)
-  instance_type = "t2.medium"  # As requested
+  ami           = data.aws_ami.ubuntu.id  # Uses the same data source
+  instance_type = "t3.medium"  # As requested
 
   root_block_device {
     volume_type = "gp3"
@@ -107,22 +142,23 @@ resource "aws_instance" "app_server" {
     encrypted   = true
   }
 
-  key_name      = "test-keypair"  # Replace with your EC2 key pair
+  key_name = "cba_keypair"  # Replace with your EC2 key pair
 
-  security_groups = [aws_security_group.elk_sg.name]
+  vpc_security_group_ids = [aws_security_group.elk_sg.id]
 
-   user_data = templatefile("${path.module}/app-server_config.sh.tpl", 
-  {
-    elk_server_ip = aws_instance.elk_server.public_ip  
-  }
+  user_data = templatefile("${path.module}/app-server_config.sh.tpl",
+    {
+      elk_server_ip = aws_instance.elk_server.public_ip
+    }
   )
 
   tags = {
     Name = "App-server"
   }
-   # Make sure the ELK server is created first
+
+  # Make sure the ELK server is created first
   depends_on = [aws_instance.elk_server]
-  
+
   provisioner "local-exec" {
     command = "echo 'App server created with IP: ${self.public_ip}'"
   }
@@ -130,35 +166,35 @@ resource "aws_instance" "app_server" {
 
 # Output the public IP of the ELK server
 output "elk_server_public_ip" {
-  value = aws_instance.elk_server.public_ip
+  value       = aws_instance.elk_server.public_ip
   description = "The public IP address of the ELK server"
 }
 
 output "Note" {
-  value = "Please wait 3-5 minutes for the ELK stack to fully initialize before accessing the above URLs."
+  value       = "Please wait 3-5 minutes for the ELK stack to fully initialize before accessing the above URLs."
   description = "Instructions for the user to wait before accessing services"
 }
 
 # Output the Kibana URL
 output "kibana_url" {
-  value = "http://${aws_instance.elk_server.public_ip}:5601"
+  value       = "http://${aws_instance.elk_server.public_ip}:5601"
   description = "The URL to access Kibana"
 }
 
 # Output the Elasticsearch URL
 output "elasticsearch_url" {
-  value = "http://${aws_instance.elk_server.public_ip}:9200"
+  value       = "http://${aws_instance.elk_server.public_ip}:9200"
   description = "The URL to access Elasticsearch"
 }
 
 # Output the App server public IP
 output "app_server_public_ip" {
-  value = aws_instance.app_server.public_ip
+  value       = aws_instance.app_server.public_ip
   description = "The public IP address of the App server"
 }
 
 # Output the App server URL
 output "app_server_url" {
-  value = "http://${aws_instance.app_server.public_ip}:8080"
+  value       = "http://${aws_instance.app_server.public_ip}:8080"
   description = "The URL to access the App server"
 }
